@@ -13,7 +13,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.screen import Screen
-from textual.widgets import DataTable, Footer, Header, Static
+from textual.widgets import DataTable, Footer, Header, Input, Static
 
 # ── Data layer ──────────────────────────────────────────────────────────────
 
@@ -174,11 +174,6 @@ def load_conversation(path: Path) -> list[dict]:
 class ConversationDetail(VerticalScroll):
     """Scrollable view of a single conversation's messages."""
 
-    BINDINGS = [
-        Binding("escape", "back", "Back"),
-        Binding("q", "back", "Back"),
-    ]
-
     def __init__(self, conv: dict, **kwargs):
         super().__init__(**kwargs)
         self.conv = conv
@@ -194,17 +189,21 @@ class ConversationDetail(VerticalScroll):
             if role == "user":
                 # Check if this is a tool result
                 if text.startswith("[Result "):
-                    yield Static(
+                    w = Static(
                         Text.from_markup(f"[dim]{_escape(text)}[/dim]"),
                         classes="tool-result",
                     )
+                    w._plain_text = text
+                    yield w
                 else:
-                    yield Static(
+                    w = Static(
                         Text.from_markup(
                             f"[bold cyan]▌ User[/bold cyan]\n{_escape(text)}"
                         ),
                         classes="user-msg",
                     )
+                    w._plain_text = text
+                    yield w
             else:
                 # Assistant — split tool use lines from text
                 lines = text.split("\n")
@@ -216,16 +215,19 @@ class ConversationDetail(VerticalScroll):
                         parts.append(f"[dim]{_escape(ln)}[/dim]")
                     else:
                         parts.append(_escape(ln))
-                yield Static(
+                w = Static(
                     Text.from_markup(
                         f"[bold green]▌ Assistant[/bold green]\n"
                         + "\n".join(parts)
                     ),
                     classes="assistant-msg",
                 )
+                w._plain_text = text
+                yield w
 
-    def action_back(self) -> None:
-        self.app.pop_screen()
+    def _scroll_to_top(self, widget: Static) -> None:
+        """Scroll so that widget is at the top of the viewport."""
+        self.scroll_to(y=max(0, widget.virtual_region.y), animate=False)
 
 
 class ConversationScreen(Screen):
@@ -234,30 +236,123 @@ class ConversationScreen(Screen):
     BINDINGS = [
         Binding("escape", "back", "Back"),
         Binding("q", "back", "Back"),
+        Binding("u", "next_user", "Next user msg"),
+        Binding("s", "search", "Search"),
+        Binding("n", "search_next", "Next match"),
+        Binding("ctrl+f", "page_down", "Page down", show=False),
+        Binding("ctrl+b", "page_up", "Page up", show=False),
     ]
 
     def __init__(self, conv: dict, **kwargs):
         super().__init__(**kwargs)
         self.conv = conv
+        self._search_term: str = ""
 
     def compose(self) -> ComposeResult:
-        title = self.conv.get("title", self.conv["session_id"][:8])
         yield Header()
         yield ConversationDetail(self.conv, id="detail")
+        yield Input(placeholder="Search…", id="search-input")
         yield Footer()
 
     def on_mount(self) -> None:
         title = self.conv.get("title", self.conv["session_id"][:8])
         self.title = _truncate(title, 80)
         self.sub_title = self.conv["project"]
+        self.query_one("#search-input", Input).display = False
 
     def action_back(self) -> None:
+        search_input = self.query_one("#search-input", Input)
+        if search_input.display:
+            search_input.display = False
+            self.query_one("#detail", ConversationDetail).focus()
+            return
         self.app.pop_screen()
+
+    # ── ctrl+f / ctrl+b: page down / up ──────────────────────────────────
+
+    def action_page_down(self) -> None:
+        detail = self.query_one("#detail", ConversationDetail)
+        detail.scroll_to(y=detail.scroll_y + detail.size.height, animate=False)
+
+    def action_page_up(self) -> None:
+        detail = self.query_one("#detail", ConversationDetail)
+        detail.scroll_to(y=max(0, detail.scroll_y - detail.size.height), animate=False)
+
+    # ── u: next user message ────────────────────────────────────────────
+
+    def action_next_user(self) -> None:
+        detail = self.query_one("#detail", ConversationDetail)
+        user_widgets = detail.query(".user-msg")
+        if not user_widgets:
+            return
+        # Find the first user widget whose top is below the current scroll position
+        # (add a small offset so pressing u again skips the current one)
+        current_top = detail.scroll_y + 1
+        for w in user_widgets:
+            if w.virtual_region.y > current_top:
+                detail._scroll_to_top(w)
+                return
+        # Wrap around to first
+        detail._scroll_to_top(user_widgets[0])
+
+    # ── s: search ───────────────────────────────────────────────────────
+
+    def action_search(self) -> None:
+        search_input = self.query_one("#search-input", Input)
+        search_input.value = self._search_term
+        search_input.display = True
+        search_input.focus()
+
+    @on(Input.Submitted, "#search-input")
+    def on_search_submitted(self, event: Input.Submitted) -> None:
+        search_input = self.query_one("#search-input", Input)
+        search_input.display = False
+        self._search_term = event.value.strip()
+        if self._search_term:
+            self._do_search(from_top=True)
+        self.query_one("#detail", ConversationDetail).focus()
+
+    def _do_search(self, from_top: bool = False) -> None:
+        if not self._search_term:
+            return
+        detail = self.query_one("#detail", ConversationDetail)
+        term = self._search_term.lower()
+        all_widgets = list(detail.query(Static))
+        if not all_widgets:
+            return
+        # Start searching after the current scroll position
+        if from_top:
+            start_y = 0
+        else:
+            start_y = detail.scroll_y + 1
+        # Find first match after start_y
+        for w in all_widgets:
+            plain = getattr(w, "_plain_text", "")
+            if w.virtual_region.y > start_y and term in plain.lower():
+                detail._scroll_to_top(w)
+                return
+        # Wrap: search from top
+        for w in all_widgets:
+            plain = getattr(w, "_plain_text", "")
+            if term in plain.lower():
+                detail._scroll_to_top(w)
+                return
+
+    # ── n: next search match ────────────────────────────────────────────
+
+    def action_search_next(self) -> None:
+        self._do_search(from_top=False)
 
 
 def _escape(text: str) -> str:
     """Escape Rich markup characters in user/assistant text."""
     return text.replace("[", "\\[")
+
+
+def _human_size(nbytes: int) -> Text:
+    """Format byte count as right-aligned MB string."""
+    mb = nbytes / (1024 * 1024)
+    return Text(f"{mb:.2f} MB", justify="right")
 
 
 def _truncate(text: str, length: int) -> str:
@@ -291,6 +386,11 @@ class LogViewerApp(App):
     #detail {
         padding: 0 1;
     }
+    #search-input {
+        dock: bottom;
+        margin: 0;
+        height: auto;
+    }
     """
     BINDINGS = [
         Binding("q", "quit", "Quit"),
@@ -309,7 +409,7 @@ class LogViewerApp(App):
     def on_mount(self) -> None:
         table = self.query_one("#index", DataTable)
         table.cursor_type = "row"
-        table.add_columns("Project", "Title", "Date", "Msgs")
+        table.add_columns("Project", "Size", "Title", "Date", "Msgs")
         self.loading = True
         self.call_later(self._load_index)
 
@@ -327,6 +427,7 @@ class LogViewerApp(App):
             date_str = c["mtime"].strftime("%Y-%m-%d %H:%M")
             table.add_row(
                 c["project"],
+                _human_size(c["size"]),
                 _truncate(c["title"], 80),
                 date_str,
                 str(c["msg_count"]),

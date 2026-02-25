@@ -1,0 +1,20 @@
+[project]
+authors = [{name = "Konrad Rokicki", email = "rokickik@janelia.hhmi.org"}]
+dependencies = ["textual>=0.86", "rich>=13.9"]
+name = "claude-log-viewer"
+requires-python = ">= 3.11"
+version = "0.1.0"
+
+[build-system]
+build-backend = "hatchling.build"
+requires = ["hatchling"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[tool.pixi.pypi-dependencies]
+claude_log_viewer = { path = ".", editable = true }
+
+[tool.pixi.tasks]
+viewer = "python viewer.py"
