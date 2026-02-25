@@ -20,12 +20,13 @@ pixi run viewer
 
 ### Conversation Index
 
-| Key     | Action                              |
-|---------|-------------------------------------|
-| Enter   | Open selected conversation          |
-| s       | Search conversations by content     |
-| Escape  | Clear search / dismiss search input |
-| q       | Quit                                |
+| Key            | Action                              |
+|----------------|-------------------------------------|
+| Enter          | Open selected conversation          |
+| s              | Search conversations by content     |
+| Escape         | Clear search / dismiss search input |
+| Click column   | Sort by column (click again to reverse) |
+| q              | Quit                                |
 
 ### Conversation Detail
 

@@ -445,11 +445,22 @@ class LogViewerApp(App):
         Binding("escape", "clear_search", "Clear search"),
     ]
 
+    # Column definitions: (label, sort_key_func, reverse_default)
+    _COLUMNS = [
+        ("Project", lambda c: c["project"].lower(), False),
+        ("Msgs", lambda c: c["msg_count"], True),
+        ("Size", lambda c: c["size"], True),
+        ("Title", lambda c: c["title"].lower(), False),
+        ("Date", lambda c: c["mtime"], True),
+    ]
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.all_conversations: list[dict] = []
         self.conversations: list[dict] = []
         self._search_term: str = ""
+        self._sort_col: int = 4  # Date column
+        self._sort_reverse: bool = True  # Newest first
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -460,7 +471,8 @@ class LogViewerApp(App):
     def on_mount(self) -> None:
         table = self.query_one("#index", DataTable)
         table.cursor_type = "row"
-        table.add_columns("Project", "Size", "Title", "Date", "Msgs")
+        for label, _, _ in self._COLUMNS:
+            table.add_column(label)
         self.query_one("#index-search", Input).display = False
         self.loading = True
         self.call_later(self._load_index)
@@ -469,11 +481,15 @@ class LogViewerApp(App):
         convs = discover_conversations()
         for c in convs:
             load_conversation_preview(c)
-        convs.sort(key=lambda c: c["mtime"], reverse=True)
         self.all_conversations = convs
         self.conversations = convs
-        self._populate_table(convs)
+        self._sort_and_populate()
         self.loading = False
+
+    def _sort_and_populate(self) -> None:
+        _, key_func, _ = self._COLUMNS[self._sort_col]
+        self.conversations.sort(key=key_func, reverse=self._sort_reverse)
+        self._populate_table(self.conversations)
 
     def _populate_table(self, convs: list[dict]) -> None:
         table = self.query_one("#index", DataTable)
@@ -482,11 +498,21 @@ class LogViewerApp(App):
             date_str = c["mtime"].strftime("%Y-%m-%d %H:%M")
             table.add_row(
                 c["project"],
+                str(c["msg_count"]),
                 _human_size(c["size"]),
                 _truncate(c["title"], 80),
                 date_str,
-                str(c["msg_count"]),
             )
+
+    @on(DataTable.HeaderSelected)
+    def on_header_selected(self, event: DataTable.HeaderSelected) -> None:
+        col_idx = event.column_index
+        if col_idx == self._sort_col:
+            self._sort_reverse = not self._sort_reverse
+        else:
+            self._sort_col = col_idx
+            _, _, self._sort_reverse = self._COLUMNS[col_idx]
+        self._sort_and_populate()
 
     def action_search(self) -> None:
         search_input = self.query_one("#index-search", Input)
