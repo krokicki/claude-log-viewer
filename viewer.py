@@ -145,6 +145,30 @@ def _extract_text(content) -> str:
     return ""
 
 
+def _conversation_contains(path: Path, term: str) -> bool:
+    """Check if any visible message text in a conversation contains the search term."""
+    try:
+        with open(path) as f:
+            for line in f:
+                # Fast pre-filter: skip lines that aren't user/assistant messages
+                if '"type":"user"' not in line and '"type": "user"' not in line \
+                        and '"type":"assistant"' not in line and '"type": "assistant"' not in line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if obj.get("isMeta"):
+                    continue
+                content = obj.get("message", {}).get("content", "")
+                text = _extract_text(content)
+                if text and term in text.lower():
+                    return True
+    except OSError:
+        pass
+    return False
+
+
 def load_conversation(path: Path) -> list[dict]:
     """Full parse of a conversation file. Returns list of {role, content_text} dicts."""
     messages = []
@@ -488,14 +512,8 @@ class LogViewerApp(App):
         term = self._search_term.lower()
         matches = []
         for c in self.all_conversations:
-            try:
-                with open(c["path"]) as f:
-                    for line in f:
-                        if term in line.lower():
-                            matches.append(c)
-                            break
-            except OSError:
-                continue
+            if _conversation_contains(c["path"], term):
+                matches.append(c)
         self.conversations = matches
         self._populate_table(matches)
         self.sub_title = f"\"{self._search_term}\" — {len(matches)} result{'s' if len(matches) != 1 else ''}"
