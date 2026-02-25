@@ -20,10 +20,12 @@ pixi run viewer
 
 ### Conversation Index
 
-| Key     | Action                     |
-|---------|----------------------------|
-| Enter   | Open selected conversation |
-| q       | Quit                       |
+| Key     | Action                              |
+|---------|-------------------------------------|
+| Enter   | Open selected conversation          |
+| s       | Search conversations by content     |
+| Escape  | Clear search / dismiss search input |
+| q       | Quit                                |
 
 ### Conversation Detail
 

@@ -189,21 +189,13 @@ class ConversationDetail(VerticalScroll):
             if role == "user":
                 # Check if this is a tool result
                 if text.startswith("[Result "):
-                    w = Static(
-                        Text.from_markup(f"[dim]{_escape(text)}[/dim]"),
-                        classes="tool-result",
-                    )
-                    w._plain_text = text
-                    yield w
+                    rendered = Text.from_markup(f"[dim]{_escape(text)}[/dim]")
+                    w = Static(rendered, classes="tool-result")
                 else:
-                    w = Static(
-                        Text.from_markup(
-                            f"[bold cyan]▌ User[/bold cyan]\n{_escape(text)}"
-                        ),
-                        classes="user-msg",
+                    rendered = Text.from_markup(
+                        f"[bold cyan]▌ User[/bold cyan]\n{_escape(text)}"
                     )
-                    w._plain_text = text
-                    yield w
+                    w = Static(rendered, classes="user-msg")
             else:
                 # Assistant — split tool use lines from text
                 lines = text.split("\n")
@@ -215,19 +207,36 @@ class ConversationDetail(VerticalScroll):
                         parts.append(f"[dim]{_escape(ln)}[/dim]")
                     else:
                         parts.append(_escape(ln))
-                w = Static(
-                    Text.from_markup(
-                        f"[bold green]▌ Assistant[/bold green]\n"
-                        + "\n".join(parts)
-                    ),
-                    classes="assistant-msg",
+                rendered = Text.from_markup(
+                    f"[bold green]▌ Assistant[/bold green]\n"
+                    + "\n".join(parts)
                 )
-                w._plain_text = text
-                yield w
+                w = Static(rendered, classes="assistant-msg")
+            w._plain_text = text
+            w._original_renderable = rendered
+            yield w
 
     def _scroll_to_top(self, widget: Static) -> None:
         """Scroll so that widget is at the top of the viewport."""
         self.scroll_to(y=max(0, widget.virtual_region.y), animate=False)
+
+    def highlight(self, term: str) -> None:
+        """Highlight all occurrences of term in all message widgets."""
+        for w in self.query(Static):
+            original = getattr(w, "_original_renderable", None)
+            if original is None:
+                continue
+            highlighted = original.copy()
+            highlighted.highlight_words([term], style="on dark_magenta", case_sensitive=False)
+            w.update(highlighted)
+
+    def clear_highlights(self) -> None:
+        """Restore all widgets to their original (unhighlighted) text."""
+        for w in self.query(Static):
+            original = getattr(w, "_original_renderable", None)
+            if original is None:
+                continue
+            w.update(original)
 
 
 class ConversationScreen(Screen):
@@ -243,10 +252,10 @@ class ConversationScreen(Screen):
         Binding("ctrl+b", "page_up", "Page up", show=False),
     ]
 
-    def __init__(self, conv: dict, **kwargs):
+    def __init__(self, conv: dict, search_term: str = "", **kwargs):
         super().__init__(**kwargs)
         self.conv = conv
-        self._search_term: str = ""
+        self._search_term: str = search_term
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -259,6 +268,9 @@ class ConversationScreen(Screen):
         self.title = _truncate(title, 80)
         self.sub_title = self.conv["project"]
         self.query_one("#search-input", Input).display = False
+        if self._search_term:
+            # Defer until after layout so virtual_region positions are valid
+            self.set_timer(0.2, lambda: self._do_search(from_top=True))
 
     def action_back(self) -> None:
         search_input = self.query_one("#search-input", Input)
@@ -307,10 +319,15 @@ class ConversationScreen(Screen):
     def on_search_submitted(self, event: Input.Submitted) -> None:
         search_input = self.query_one("#search-input", Input)
         search_input.display = False
-        self._search_term = event.value.strip()
+        detail = self.query_one("#detail", ConversationDetail)
+        new_term = event.value.strip()
+        if new_term != self._search_term:
+            detail.clear_highlights()
+        self._search_term = new_term
         if self._search_term:
+            detail.highlight(self._search_term)
             self._do_search(from_top=True)
-        self.query_one("#detail", ConversationDetail).focus()
+        detail.focus()
 
     def _do_search(self, from_top: bool = False) -> None:
         if not self._search_term:
@@ -320,23 +337,28 @@ class ConversationScreen(Screen):
         all_widgets = list(detail.query(Static))
         if not all_widgets:
             return
-        # Start searching after the current scroll position
         if from_top:
-            start_y = 0
+            # Search from the beginning — match by list order, not position
+            detail.highlight(self._search_term)
+            for w in all_widgets:
+                plain = getattr(w, "_plain_text", "")
+                if term in plain.lower():
+                    detail._scroll_to_top(w)
+                    return
         else:
+            # Search after current scroll position
             start_y = detail.scroll_y + 1
-        # Find first match after start_y
-        for w in all_widgets:
-            plain = getattr(w, "_plain_text", "")
-            if w.virtual_region.y > start_y and term in plain.lower():
-                detail._scroll_to_top(w)
-                return
-        # Wrap: search from top
-        for w in all_widgets:
-            plain = getattr(w, "_plain_text", "")
-            if term in plain.lower():
-                detail._scroll_to_top(w)
-                return
+            for w in all_widgets:
+                plain = getattr(w, "_plain_text", "")
+                if w.virtual_region.y > start_y and term in plain.lower():
+                    detail._scroll_to_top(w)
+                    return
+            # Wrap: search from top
+            for w in all_widgets:
+                plain = getattr(w, "_plain_text", "")
+                if term in plain.lower():
+                    detail._scroll_to_top(w)
+                    return
 
     # ── n: next search match ────────────────────────────────────────────
 
@@ -386,7 +408,7 @@ class LogViewerApp(App):
     #detail {
         padding: 0 1;
     }
-    #search-input {
+    #search-input, #index-search {
         dock: bottom;
         margin: 0;
         height: auto;
@@ -395,34 +417,43 @@ class LogViewerApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("enter", "open", "Open", show=False),
+        Binding("s", "search", "Search"),
+        Binding("escape", "clear_search", "Clear search"),
     ]
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.all_conversations: list[dict] = []
         self.conversations: list[dict] = []
+        self._search_term: str = ""
 
     def compose(self) -> ComposeResult:
         yield Header()
         yield DataTable(id="index")
+        yield Input(placeholder="Search conversations…", id="index-search")
         yield Footer()
 
     def on_mount(self) -> None:
         table = self.query_one("#index", DataTable)
         table.cursor_type = "row"
         table.add_columns("Project", "Size", "Title", "Date", "Msgs")
+        self.query_one("#index-search", Input).display = False
         self.loading = True
         self.call_later(self._load_index)
 
     def _load_index(self) -> None:
         convs = discover_conversations()
-        # Load previews
         for c in convs:
             load_conversation_preview(c)
-        # Sort by modification time, newest first
         convs.sort(key=lambda c: c["mtime"], reverse=True)
+        self.all_conversations = convs
         self.conversations = convs
+        self._populate_table(convs)
+        self.loading = False
 
+    def _populate_table(self, convs: list[dict]) -> None:
         table = self.query_one("#index", DataTable)
+        table.clear()
         for c in convs:
             date_str = c["mtime"].strftime("%Y-%m-%d %H:%M")
             table.add_row(
@@ -432,21 +463,69 @@ class LogViewerApp(App):
                 date_str,
                 str(c["msg_count"]),
             )
-        self.loading = False
+
+    def action_search(self) -> None:
+        search_input = self.query_one("#index-search", Input)
+        search_input.value = self._search_term
+        search_input.display = True
+        search_input.focus()
+
+    @on(Input.Submitted, "#index-search")
+    def on_index_search_submitted(self, event: Input.Submitted) -> None:
+        search_input = self.query_one("#index-search", Input)
+        search_input.display = False
+        self._search_term = event.value.strip()
+        if self._search_term:
+            self.sub_title = f"Searching for \"{self._search_term}\"…"
+            self.call_later(self._run_search)
+        else:
+            self.sub_title = ""
+            self.conversations = self.all_conversations
+            self._populate_table(self.conversations)
+        self.query_one("#index", DataTable).focus()
+
+    def _run_search(self) -> None:
+        term = self._search_term.lower()
+        matches = []
+        for c in self.all_conversations:
+            try:
+                with open(c["path"]) as f:
+                    for line in f:
+                        if term in line.lower():
+                            matches.append(c)
+                            break
+            except OSError:
+                continue
+        self.conversations = matches
+        self._populate_table(matches)
+        self.sub_title = f"\"{self._search_term}\" — {len(matches)} result{'s' if len(matches) != 1 else ''}"
+
+    def action_clear_search(self) -> None:
+        search_input = self.query_one("#index-search", Input)
+        if search_input.display:
+            search_input.display = False
+            self.query_one("#index", DataTable).focus()
+            return
+        if self._search_term:
+            self._search_term = ""
+            self.sub_title = ""
+            self.conversations = self.all_conversations
+            self._populate_table(self.conversations)
+
+    def _open_conversation(self, conv: dict) -> None:
+        self.push_screen(ConversationScreen(conv, search_term=self._search_term))
 
     @on(DataTable.RowSelected)
     def on_row_selected(self, event: DataTable.RowSelected) -> None:
         row_index = event.cursor_row
         if 0 <= row_index < len(self.conversations):
-            conv = self.conversations[row_index]
-            self.push_screen(ConversationScreen(conv))
+            self._open_conversation(self.conversations[row_index])
 
     def action_open(self) -> None:
         table = self.query_one("#index", DataTable)
         row_index = table.cursor_row
         if 0 <= row_index < len(self.conversations):
-            conv = self.conversations[row_index]
-            self.push_screen(ConversationScreen(conv))
+            self._open_conversation(self.conversations[row_index])
 
 
 if __name__ == "__main__":
