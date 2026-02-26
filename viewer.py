@@ -270,6 +270,7 @@ class ConversationScreen(Screen):
         Binding("escape", "back", "Back"),
         Binding("q", "back", "Back"),
         Binding("u", "next_user", "Next user msg"),
+        Binding("U", "prev_user", "Prev user msg"),
         Binding("s", "search", "Search"),
         Binding("n", "search_next", "Next match"),
         Binding("ctrl+f", "page_down", "Page down", show=False),
@@ -318,18 +319,31 @@ class ConversationScreen(Screen):
 
     def action_next_user(self) -> None:
         detail = self.query_one("#detail", ConversationDetail)
-        user_widgets = detail.query(".user-msg")
+        user_widgets = list(detail.query(".user-msg"))
         if not user_widgets:
             return
-        # Find the first user widget whose top is below the current scroll position
-        # (add a small offset so pressing u again skips the current one)
-        current_top = detail.scroll_y + 1
-        for w in user_widgets:
-            if w.virtual_region.y > current_top:
-                detail._scroll_to_top(w)
-                return
-        # Wrap around to first
-        detail._scroll_to_top(user_widgets[0])
+        # Find which user widget is currently at/near the top
+        current_idx = -1
+        for i, w in enumerate(user_widgets):
+            if w.virtual_region.y <= detail.scroll_y + 1:
+                current_idx = i
+        # Advance to next, wrapping around
+        next_idx = (current_idx + 1) % len(user_widgets)
+        detail._scroll_to_top(user_widgets[next_idx])
+
+    def action_prev_user(self) -> None:
+        detail = self.query_one("#detail", ConversationDetail)
+        user_widgets = list(detail.query(".user-msg"))
+        if not user_widgets:
+            return
+        # Find which user widget is currently at/near the top
+        current_idx = 0
+        for i, w in enumerate(user_widgets):
+            if w.virtual_region.y <= detail.scroll_y + 1:
+                current_idx = i
+        # Go to previous, wrapping around
+        prev_idx = (current_idx - 1) % len(user_widgets)
+        detail._scroll_to_top(user_widgets[prev_idx])
 
     # ── s: search ───────────────────────────────────────────────────────
 
