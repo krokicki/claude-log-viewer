@@ -38,7 +38,9 @@ pixi run viewer
 |---------|---------------------------------|
 | Escape  | Back to index                   |
 | q       | Back to index                   |
-| u       | Jump to next user message       |
+| u / U   | Jump to next / previous user message |
+| gg      | Jump to top                     |
+| G       | Jump to end                     |
 | s       | Search for text                 |
 | n       | Repeat search (next match)      |
 | Ctrl+F  | Page down                       |

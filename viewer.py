@@ -363,6 +363,8 @@ class ConversationScreen(Screen):
         Binding("U", "prev_user", "Prev user msg"),
         Binding("s", "search", "Search"),
         Binding("n", "search_next", "Next match"),
+        Binding("G", "goto_end", "End"),
+        Binding("g", "goto_top", "Top (gg)"),
         Binding("ctrl+f", "page_down", "Page down", show=False),
         Binding("ctrl+b", "page_up", "Page up", show=False),
     ]
@@ -371,6 +373,7 @@ class ConversationScreen(Screen):
         super().__init__(**kwargs)
         self.conv = conv
         self._search_term: str = search_term
+        self._pending_g: bool = False  # first half of a vim "gg"
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -394,6 +397,23 @@ class ConversationScreen(Screen):
             self.query_one("#detail", ConversationDetail).focus()
             return
         self.app.pop_screen()
+
+    # ── gg / G: top / bottom ─────────────────────────────────────────────
+
+    def on_key(self, event) -> None:
+        if event.key != "g":
+            self._pending_g = False
+
+    def action_goto_top(self) -> None:
+        """vim gg — the first g arms, the second jumps."""
+        if not self._pending_g:
+            self._pending_g = True
+            return
+        self._pending_g = False
+        self.query_one("#detail", ConversationDetail).scroll_home(animate=False)
+
+    def action_goto_end(self) -> None:
+        self.query_one("#detail", ConversationDetail).scroll_end(animate=False)
 
     # ── ctrl+f / ctrl+b: page down / up ──────────────────────────────────
 
