@@ -169,8 +169,31 @@ def _conversation_contains(path: Path, term: str) -> bool:
     return False
 
 
-def load_conversation(path: Path) -> list[dict]:
-    """Full parse of a conversation file. Returns list of {role, content_text} dicts."""
+def _subagent_transcripts(path: Path) -> dict[str, tuple[Path, dict]]:
+    """Map parent tool_use id → (subagent transcript, meta) for a session.
+
+    Claude Code writes subagent logs to <session-id>/subagents/agent-<id>.jsonl
+    alongside a .meta.json naming the Task tool_use that spawned it.
+    """
+    agents = {}
+    for meta_path in (path.parent / path.stem / "subagents").glob("agent-*.meta.json"):
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        jsonl = meta_path.with_suffix("").with_suffix(".jsonl")  # .meta.json → .jsonl
+        if meta.get("toolUseId") and jsonl.exists():
+            agents[meta["toolUseId"]] = (jsonl, meta)
+    return agents
+
+
+def load_conversation(path: Path, subagents=None, depth: int = 0) -> list[dict]:
+    """Full parse of a conversation file. Returns list of {role, text, depth} dicts.
+
+    Subagent transcripts are inlined where their Task tool call appears.
+    """
+    if subagents is None:
+        subagents = _subagent_transcripts(path)
     messages = []
     with open(path) as f:
         for line in f:
@@ -185,10 +208,25 @@ def load_conversation(path: Path) -> list[dict]:
                 continue
             content = obj.get("message", {}).get("content", "")
             text = _extract_text(content)
-            if not text:
+            if text:
+                role = "user" if msg_type == "user" else "assistant"
+                messages.append({"role": role, "text": text, "depth": depth})
+            if not isinstance(content, list):
                 continue
-            role = "user" if msg_type == "user" else "assistant"
-            messages.append({"role": role, "text": text})
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_use":
+                    continue
+                sub = subagents.get(block.get("id"))
+                if not sub:
+                    continue
+                sub_path, meta = sub
+                label = "{} — {}, {}".format(
+                    meta.get("description", "subagent"),
+                    meta.get("agentType", "?"),
+                    meta.get("model", "?"),
+                )
+                messages.append({"role": "subagent", "text": label, "depth": depth})
+                messages.extend(load_conversation(sub_path, subagents, depth + 1))
     return messages
 
 
@@ -210,7 +248,11 @@ class ConversationDetail(VerticalScroll):
         for msg in messages:
             role = msg["role"]
             text = msg["text"]
-            if role == "user":
+            depth = msg.get("depth", 0)
+            if role == "subagent":
+                rendered = Text.from_markup(f"[bold magenta]▼ Subagent: {_escape(text)}[/bold magenta]")
+                w = Static(rendered, classes="subagent-hdr")
+            elif role == "user":
                 # Check if this is a tool result
                 if text.startswith("[Result "):
                     rendered = Text.from_markup(f"[dim]{_escape(text)}[/dim]")
@@ -219,7 +261,8 @@ class ConversationDetail(VerticalScroll):
                     rendered = Text.from_markup(
                         f"[bold cyan]▌ User[/bold cyan]\n{_escape(text)}"
                     )
-                    w = Static(rendered, classes="user-msg")
+                    # Nested prompts get their own class so `u` navigation skips them
+                    w = Static(rendered, classes="user-msg" if not depth else "sub-user-msg")
             else:
                 # Assistant — split tool use lines from text
                 lines = text.split("\n")
@@ -236,6 +279,8 @@ class ConversationDetail(VerticalScroll):
                     + "\n".join(parts)
                 )
                 w = Static(rendered, classes="assistant-msg")
+            if depth:
+                w.styles.padding = (0, 1, 0, 1 + depth * 3)
             w._plain_text = text
             w._original_renderable = rendered
             yield w
@@ -442,6 +487,16 @@ class LogViewerApp(App):
     .tool-result {
         margin: 0;
         padding: 0 2;
+    }
+    .sub-user-msg {
+        margin: 1 0 0 0;
+        padding: 0 1;
+        border-left: thick $accent;
+    }
+    .subagent-hdr {
+        margin: 1 0 0 0;
+        padding: 0 1;
+        border-left: thick $warning;
     }
     #detail {
         padding: 0 1;
