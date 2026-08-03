@@ -19,6 +19,25 @@ from textual.widgets import DataTable, Footer, Header, Input, Static
 
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
+# Flag tool calls slower than this. ~p95 of 36k tool calls across local transcripts.
+SLOW_TOOL_SECONDS = 10.0
+
+
+def _parse_ts(value) -> "datetime | None":
+    """Parse an ISO-8601 UTC timestamp into local time."""
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone()
+    except (AttributeError, ValueError):
+        return None
+
+
+def _human_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m {int(seconds % 60)}s"
+    return f"{int(seconds // 3600)}h {int(seconds % 3600 // 60)}m"
+
 def _readable_project(dirname: str) -> str:
     """Derive a human-readable project name from the directory name.
 
@@ -188,13 +207,15 @@ def _subagent_transcripts(path: Path) -> dict[str, tuple[Path, dict]]:
 
 
 def load_conversation(path: Path, subagents=None, depth: int = 0) -> list[dict]:
-    """Full parse of a conversation file. Returns list of {role, text, depth} dicts.
+    """Full parse of a conversation file. Returns list of {role, text, depth, ts} dicts.
 
-    Subagent transcripts are inlined where their Task tool call appears.
+    Subagent transcripts are inlined where their Task tool call appears, and
+    tool calls that took longer than SLOW_TOOL_SECONDS get a "took X" entry.
     """
     if subagents is None:
         subagents = _subagent_transcripts(path)
     messages = []
+    started: dict[str, datetime] = {}  # tool_use id → when the call was issued
     with open(path) as f:
         for line in f:
             try:
@@ -206,27 +227,45 @@ def load_conversation(path: Path, subagents=None, depth: int = 0) -> list[dict]:
                 continue
             if obj.get("isMeta"):
                 continue
+            ts = _parse_ts(obj.get("timestamp"))
             content = obj.get("message", {}).get("content", "")
             text = _extract_text(content)
             if text:
                 role = "user" if msg_type == "user" else "assistant"
-                messages.append({"role": role, "text": text, "depth": depth})
+                messages.append({"role": role, "text": text, "depth": depth, "ts": ts})
             if not isinstance(content, list):
                 continue
             for block in content:
-                if not isinstance(block, dict) or block.get("type") != "tool_use":
+                if not isinstance(block, dict):
                     continue
-                sub = subagents.get(block.get("id"))
-                if not sub:
-                    continue
-                sub_path, meta = sub
-                label = "{} — {}, {}".format(
-                    meta.get("description", "subagent"),
-                    meta.get("agentType", "?"),
-                    meta.get("model", "?"),
-                )
-                messages.append({"role": "subagent", "text": label, "depth": depth})
-                messages.extend(load_conversation(sub_path, subagents, depth + 1))
+                if block.get("type") == "tool_use":
+                    if ts:
+                        started[block.get("id")] = ts
+                    sub = subagents.get(block.get("id"))
+                    if not sub:
+                        continue
+                    sub_path, meta = sub
+                    label = "{} — {}, {}".format(
+                        meta.get("description", "subagent"),
+                        meta.get("agentType", "?"),
+                        meta.get("model", "?"),
+                    )
+                    messages.append(
+                        {"role": "subagent", "text": label, "depth": depth, "ts": ts}
+                    )
+                    messages.extend(load_conversation(sub_path, subagents, depth + 1))
+                elif block.get("type") == "tool_result":
+                    issued = started.pop(block.get("tool_use_id"), None)
+                    if not issued or not ts:
+                        continue
+                    elapsed = (ts - issued).total_seconds()
+                    if elapsed >= SLOW_TOOL_SECONDS:
+                        messages.append({
+                            "role": "duration",
+                            "text": f"took {_human_duration(elapsed)}",
+                            "depth": depth,
+                            "ts": ts,
+                        })
     return messages
 
 
@@ -249,17 +288,23 @@ class ConversationDetail(VerticalScroll):
             role = msg["role"]
             text = msg["text"]
             depth = msg.get("depth", 0)
-            if role == "subagent":
-                rendered = Text.from_markup(f"[bold magenta]▼ Subagent: {_escape(text)}[/bold magenta]")
+            stamp = msg["ts"].strftime("%H:%M:%S") if msg.get("ts") else "--:--:--"
+            if role == "duration":
+                rendered = Text.from_markup(f"[bold yellow]⏱ {_escape(text)}[/bold yellow]")
+                w = Static(rendered, classes="duration")
+            elif role == "subagent":
+                rendered = Text.from_markup(
+                    f"[bold magenta]▼ Subagent: {_escape(text)}[/bold magenta] [dim]{stamp}[/dim]"
+                )
                 w = Static(rendered, classes="subagent-hdr")
             elif role == "user":
                 # Check if this is a tool result
                 if text.startswith("[Result "):
-                    rendered = Text.from_markup(f"[dim]{_escape(text)}[/dim]")
+                    rendered = Text.from_markup(f"[dim]{stamp} {_escape(text)}[/dim]")
                     w = Static(rendered, classes="tool-result")
                 else:
                     rendered = Text.from_markup(
-                        f"[bold cyan]▌ User[/bold cyan]\n{_escape(text)}"
+                        f"[bold cyan]▌ User[/bold cyan] [dim]{stamp}[/dim]\n{_escape(text)}"
                     )
                     # Nested prompts get their own class so `u` navigation skips them
                     w = Static(rendered, classes="user-msg" if not depth else "sub-user-msg")
@@ -275,7 +320,7 @@ class ConversationDetail(VerticalScroll):
                     else:
                         parts.append(_escape(ln))
                 rendered = Text.from_markup(
-                    f"[bold green]▌ Assistant[/bold green]\n"
+                    f"[bold green]▌ Assistant[/bold green] [dim]{stamp}[/dim]\n"
                     + "\n".join(parts)
                 )
                 w = Static(rendered, classes="assistant-msg")
@@ -492,6 +537,10 @@ class LogViewerApp(App):
         margin: 1 0 0 0;
         padding: 0 1;
         border-left: thick $accent;
+    }
+    .duration {
+        margin: 0;
+        padding: 0 2;
     }
     .subagent-hdr {
         margin: 1 0 0 0;

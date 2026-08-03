@@ -2,6 +2,10 @@
 
 A terminal UI for browsing Claude Code conversation logs stored in `~/.claude/projects/`.
 
+Subagent transcripts are spliced into the parent conversation at the `Task` call that
+spawned them, indented by spawn depth. Every message is timestamped, and any tool call
+taking longer than 10s (~p95) gets a `⏱ took Xm Ys` line so slow steps are easy to spot.
+
 ## Setup
 
 Requires [pixi](https://pixi.sh):

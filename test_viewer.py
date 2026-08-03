@@ -48,6 +48,31 @@ def test_subagent_inlined():
         assert msgs[3]["text"] == "sub work"
 
 
+def test_slow_tool_flagged():
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = Path(tmp)
+        def turn(t, blocks, kind="assistant"):
+            return {"type": kind, "timestamp": t, "message": {"content": blocks}}
+
+        _write(proj / "sess.jsonl", [
+            turn("2026-08-03T17:00:00.000Z",
+                 [{"type": "tool_use", "id": "fast", "name": "Read", "input": {}}]),
+            turn("2026-08-03T17:00:03.000Z",
+                 [{"type": "tool_result", "tool_use_id": "fast", "content": "ok"}], "user"),
+            turn("2026-08-03T17:00:10.000Z",
+                 [{"type": "tool_use", "id": "slow", "name": "Bash", "input": {}}]),
+            turn("2026-08-03T17:02:35.000Z",
+                 [{"type": "tool_result", "tool_use_id": "slow", "content": "ok"}], "user"),
+        ])
+
+        msgs = load_conversation(proj / "sess.jsonl")
+        durations = [m["text"] for m in msgs if m["role"] == "duration"]
+        assert durations == ["took 2m 25s"], durations  # 3s call not flagged
+        assert msgs[-1]["role"] == "duration"  # lands right after its result
+        assert all(m["ts"] is not None for m in msgs)
+
+
 if __name__ == "__main__":
     test_subagent_inlined()
+    test_slow_tool_flagged()
     print("ok")
